@@ -46,31 +46,76 @@ const violationSchema = new mongoose.Schema({
 const Customer = mongoose.model('Customer', customerSchema);
 const Violation = mongoose.model('Violation', violationSchema);
 
-// Routes
-// 1. CSP Report endpoint
 app.post('/csp-report/:uniqueId', async (req, res) => {
     try {
         const { uniqueId } = req.params;
 
+        // Log everything about this request for debugging
+        console.log('=== CSP REPORT RECEIVED ===');
+        console.log(`Time: ${new Date().toISOString()}`);
+        console.log(`Customer ID: ${uniqueId}`);
+        console.log('Request Headers:');
+        console.log(JSON.stringify(req.headers, null, 2));
+        console.log('Request Body:');
+        console.log(JSON.stringify(req.body, null, 2));
+
+        // Also log to a file for persistence
+        const fs = require('fs');
+        const logData = {
+            timestamp: new Date().toISOString(),
+            uniqueId,
+            headers: req.headers,
+            body: req.body
+        };
+
+        fs.appendFileSync(
+            'csp-reports.log',
+            JSON.stringify(logData, null, 2) + ',\n',
+            { flag: 'a+' }
+        );
+
         // Verify the uniqueId exists
         const customer = await Customer.findOne({ uniqueId });
         if (!customer) {
+            console.log(`Invalid customer ID: ${uniqueId}`);
             return res.status(404).json({ error: 'Invalid reporting endpoint' });
         }
 
         // Extract CSP report data
-        // Check if the data is wrapped in a 'csp-report' object (standard browser format)
-        const reportData = req.body['csp-report'] || req.body;
+        // Try multiple possible formats browsers might send
+        let reportData;
+
+        if (req.body['csp-report']) {
+            // Standard browser format
+            reportData = req.body['csp-report'];
+            console.log('Found data in csp-report property');
+        } else if (req.body.report) {
+            // Some browsers might use this format
+            reportData = req.body.report;
+            console.log('Found data in report property');
+        } else if (req.body['content-security-policy-report']) {
+            // Another possible format
+            reportData = req.body['content-security-policy-report'];
+            console.log('Found data in content-security-policy-report property');
+        } else {
+            // Assume the body itself contains the report
+            reportData = req.body;
+            console.log('Using entire request body as report data');
+        }
+
+        console.log('Extracted report data:');
+        console.log(JSON.stringify(reportData, null, 2));
 
         // Create new violation record
         const violation = new Violation({
             customerId: customer.uniqueId,
-            reportData: reportData,  // Store the report data in the correct field
+            reportData: reportData,
             userAgent: req.headers['user-agent'],
             ipAddress: req.ip
         });
 
         await violation.save();
+        console.log('Violation saved to database');
 
         // CSP spec recommends returning 204 No Content
         return res.status(204).end();
