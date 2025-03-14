@@ -59,19 +59,13 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
         }
 
         // Extract CSP report data
-        let reportData;
-        if (req.body['csp-report']) {
-            // Standard CSP report format
-            reportData = req.body['csp-report'];
-        } else {
-            // Direct report data from Magento
-            reportData = req.body;
-        }
+        // Check if the data is wrapped in a 'csp-report' object (standard browser format)
+        const reportData = req.body['csp-report'] || req.body;
 
         // Create new violation record
         const violation = new Violation({
             customerId: customer.uniqueId,
-            reportData: req.body,  // Store the entire request body as reportData
+            reportData: reportData,  // Store the report data in the correct field
             userAgent: req.headers['user-agent'],
             ipAddress: req.ip
         });
