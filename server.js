@@ -92,9 +92,21 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
     try {
         const { uniqueId } = req.params;
 
+        // Log everything about this request for debugging
+        console.log('=== CSP REPORT RECEIVED ===');
+        console.log(`Time: ${new Date().toISOString()}`);
+        console.log(`Customer ID: ${uniqueId}`);
+        console.log('Request Headers:');
+        console.log(JSON.stringify(req.headers, null, 2));
+
+        // Log the entire body content
+        console.log('Request Body:');
+        console.log(JSON.stringify(req.body, null, 2));
+
         // Verify the uniqueId exists
         const customer = await Customer.findOne({ uniqueId });
         if (!customer) {
+            console.log(`Invalid customer ID: ${uniqueId}`);
             return res.status(404).json({ error: 'Invalid reporting endpoint' });
         }
 
@@ -113,6 +125,7 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
                 // Use the first CSP report
                 const firstReport = cspReports[0];
                 reportData = firstReport.body?.['csp-report'] || firstReport.body || firstReport;
+                console.log('Found data in Reports API format (array)');
             } else {
                 // No CSP reports found in the array
                 reportData = {
@@ -120,17 +133,21 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
                     'violated-directive': 'Unknown',
                     'blocked-uri': 'Unknown'
                 };
+                console.log('No CSP reports found in Reports API array');
             }
         }
         // Standard browser format with csp-report
         else if (req.body['csp-report']) {
             reportData = req.body['csp-report'];
+            console.log('Found data in csp-report property');
         }
         // Other possible formats
         else if (req.body.report) {
             reportData = req.body.report;
+            console.log('Found data in report property');
         } else if (req.body['content-security-policy-report']) {
             reportData = req.body['content-security-policy-report'];
+            console.log('Found data in content-security-policy-report property');
         }
         // Handle the case where body is empty or doesn't match expected format
         else if (Object.keys(req.body).length === 0 ||
@@ -142,6 +159,7 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
                 'blocked-uri': 'Unknown',
                 'original-report': JSON.stringify(req.body)
             };
+            console.log('Empty or invalid report format');
         }
         // Check for rawData from failed parsing
         else if (req.body.rawData) {
@@ -151,12 +169,16 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
                 'blocked-uri': 'Unknown',
                 'original-report': req.body.rawData
             };
+            console.log('Request body could not be parsed correctly');
         }
         // Assume the body itself contains the report
         else {
             reportData = req.body;
+            console.log('Using entire request body as report data');
         }
 
+        console.log('Extracted report data:');
+        console.log(JSON.stringify(reportData, null, 2));
 
         // Create new violation record
         const violation = new Violation({
@@ -167,6 +189,7 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
         });
 
         await violation.save();
+        console.log('Violation saved to database');
 
         // CSP spec recommends returning 204 No Content
         return res.status(204).end();
