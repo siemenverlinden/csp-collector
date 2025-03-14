@@ -7,9 +7,50 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const bodyParser = require('body-parser');
 
-// Middleware
+// Custom middleware to handle application/reports+json content type
+// This MUST come BEFORE other middleware
+app.use((req, res, next) => {
+    const contentType = req.headers['content-type'] || '';
+
+    if (contentType.includes('application/reports+json') ||
+        contentType.includes('application/csp-report')) {
+
+        // For these special content types, use raw body parser
+        let data = '';
+
+        req.on('data', chunk => {
+            data += chunk;
+        });
+
+        req.on('end', () => {
+            try {
+                if (data && data.trim()) {
+                    req.body = JSON.parse(data);
+                } else {
+                    // Handle empty body case
+                    req.body = {};
+                }
+                next();
+            } catch (e) {
+                console.error('Error parsing reports+json body:', e);
+                // Log the raw data for debugging
+                console.log('Raw body content (first 1000 chars):', data.substring(0, 1000));
+                // Still continue even if parsing fails
+                req.body = { rawData: data.substring(0, 1000) + '...' };
+                next();
+            }
+        });
+    } else {
+        // For other content types, proceed to next middleware
+        next();
+    }
+});
+
+// Standard middleware - AFTER the custom middleware
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
 // MongoDB connection
@@ -46,6 +87,7 @@ const violationSchema = new mongoose.Schema({
 const Customer = mongoose.model('Customer', customerSchema);
 const Violation = mongoose.model('Violation', violationSchema);
 
+// Update your CSP report endpoint to handle the Reports API format
 app.post('/csp-report/:uniqueId', async (req, res) => {
     try {
         const { uniqueId } = req.params;
@@ -56,23 +98,10 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
         console.log(`Customer ID: ${uniqueId}`);
         console.log('Request Headers:');
         console.log(JSON.stringify(req.headers, null, 2));
+
+        // Log the entire body content
         console.log('Request Body:');
         console.log(JSON.stringify(req.body, null, 2));
-
-        // Also log to a file for persistence
-        const fs = require('fs');
-        const logData = {
-            timestamp: new Date().toISOString(),
-            uniqueId,
-            headers: req.headers,
-            body: req.body
-        };
-
-        fs.appendFileSync(
-            'csp-reports.log',
-            JSON.stringify(logData, null, 2) + ',\n',
-            { flag: 'a+' }
-        );
 
         // Verify the uniqueId exists
         const customer = await Customer.findOne({ uniqueId });
@@ -81,24 +110,69 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
             return res.status(404).json({ error: 'Invalid reporting endpoint' });
         }
 
-        // Extract CSP report data
-        // Try multiple possible formats browsers might send
+        // Handle different report formats
         let reportData;
 
-        if (req.body['csp-report']) {
-            // Standard browser format
+        // Check if this is Reports API format (array of reports)
+        if (Array.isArray(req.body)) {
+            // Reports API format - extract the first CSP report
+            const cspReports = req.body.filter(report =>
+                report.type === 'csp-violation' ||
+                report.body?.['csp-report']
+            );
+
+            if (cspReports.length > 0) {
+                // Use the first CSP report
+                const firstReport = cspReports[0];
+                reportData = firstReport.body?.['csp-report'] || firstReport.body || firstReport;
+                console.log('Found data in Reports API format (array)');
+            } else {
+                // No CSP reports found in the array
+                reportData = {
+                    'document-uri': 'Unknown (No CSP reports in array)',
+                    'violated-directive': 'Unknown',
+                    'blocked-uri': 'Unknown'
+                };
+                console.log('No CSP reports found in Reports API array');
+            }
+        }
+        // Standard browser format with csp-report
+        else if (req.body['csp-report']) {
             reportData = req.body['csp-report'];
             console.log('Found data in csp-report property');
-        } else if (req.body.report) {
-            // Some browsers might use this format
+        }
+        // Other possible formats
+        else if (req.body.report) {
             reportData = req.body.report;
             console.log('Found data in report property');
         } else if (req.body['content-security-policy-report']) {
-            // Another possible format
             reportData = req.body['content-security-policy-report'];
             console.log('Found data in content-security-policy-report property');
-        } else {
-            // Assume the body itself contains the report
+        }
+        // Handle the case where body is empty or doesn't match expected format
+        else if (Object.keys(req.body).length === 0 ||
+            (!req.body['document-uri'] && !req.body['violated-directive'])) {
+
+            reportData = {
+                'document-uri': 'Unknown (Empty or Invalid Format)',
+                'violated-directive': 'Unknown',
+                'blocked-uri': 'Unknown',
+                'original-report': JSON.stringify(req.body)
+            };
+            console.log('Empty or invalid report format');
+        }
+        // Check for rawData from failed parsing
+        else if (req.body.rawData) {
+            reportData = {
+                'document-uri': 'Unknown (Parsing Error)',
+                'violated-directive': 'Unknown',
+                'blocked-uri': 'Unknown',
+                'original-report': req.body.rawData
+            };
+            console.log('Request body could not be parsed correctly');
+        }
+        // Assume the body itself contains the report
+        else {
             reportData = req.body;
             console.log('Using entire request body as report data');
         }
@@ -111,7 +185,7 @@ app.post('/csp-report/:uniqueId', async (req, res) => {
             customerId: customer.uniqueId,
             reportData: reportData,
             userAgent: req.headers['user-agent'],
-            ipAddress: req.ip
+            ipAddress: req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.ip
         });
 
         await violation.save();
